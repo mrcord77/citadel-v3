@@ -4,6 +4,12 @@ on:
     types: [opened, synchronize]
 
 permissions:
+  # `contents: read` is REQUIRED. Declaring any permissions block sets every scope
+  # not listed to `none`, and the action's first step shells out to `gh pr diff`,
+  # which reads the repository. Without it every run dies in under a second with
+  # `HTTP 403: Resource not accessible by integration` — before the RepoSignal API
+  # is ever contacted, so the failure looks like a service outage and is not one.
+  contents: read
   pull-requests: write
 
 jobs:
