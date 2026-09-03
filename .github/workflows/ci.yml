@@ -84,7 +84,7 @@ jobs:
         run: cargo install cargo-deny --quiet
 
       - name: Check licenses and advisories
-        run: cargo deny check 2>&1 || true
+        run: cargo deny check
 
   # ── Live server tests ───────────────────────────────────────────────
   live-server-tests:
