@@ -27,6 +27,7 @@ SUITE_KEM             = A3  # X25519 + ML-KEM-768
 SUITE_KDF             = C1  # HKDF-SHA-256
 SUITE_AEAD            = B1  # AES-256-GCM
 HEADER_LEN            = 98
+HEADER_BOUND_LEN      = 86  # HEADER_LEN - NONCE_LEN; the nonce-free prefix bound by the KDF/AAD
 KEM_CT_LEN            = 1120
 NONCE_LEN             = 12
 TAG_LEN               = 16
@@ -84,21 +85,31 @@ not a substitute for authenticating the context itself.
 ```
 kdf_transcript =
     "citadel-envelope-v2/kdf" || 00 ||
-    BE16(HEADER_LEN) || header ||
+    BE16(HEADER_BOUND_LEN) || header[0..HEADER_BOUND_LEN] ||
     BE16(KEM_CT_LEN) || kem_ct ||
     BE32(len(context)) || context
 ```
+
+The KDF transcript binds the **nonce-free header prefix** `header[0..86]`, and its
+length prefix is `BE16(86)` — **not** the full 98-byte header. The 12-byte nonce at
+`header[86..98]` is deliberately excluded: under FIPS Scenario 2 the module generates
+the nonce internally during seal (`RandomizedNonceKey`), so the derived key cannot
+depend on it. The nonce is still integrity-protected by AES-256-GCM itself — a flipped
+nonce yields a wrong tag — so excluding it here does not weaken tamper detection.
 
 ### 4.2 AEAD associated data
 
 ```
 aead_associated_data =
     "citadel-envelope-v2/aad" || 00 ||
-    BE16(HEADER_LEN) || header ||
+    BE16(HEADER_BOUND_LEN) || header[0..HEADER_BOUND_LEN] ||
     BE16(KEM_CT_LEN) || kem_ct ||
     BE32(len(context)) || context ||
     BE32(len(caller_aad)) || caller_aad
 ```
+
+The associated data binds the same nonce-free header prefix `header[0..86]` as the
+KDF transcript (length prefix `BE16(86)`), for the identical reason.
 
 The domain labels include the shown terminal zero byte. No field may be
 omitted, reordered, normalized, or encoded with a variable-width integer.

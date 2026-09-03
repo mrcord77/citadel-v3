@@ -149,8 +149,16 @@ curl -X POST http://localhost:8443/api/keys/$DEK_ID/encrypt \
 | `/api/keys/:id/destroy` | POST | manage | Destroy key material |
 | `/api/keys/:id/encrypt` | POST | encrypt | Encrypt data |
 | `/api/decrypt` | POST | encrypt | Decrypt data |
+| `/api/keys/:id/sign` | POST | encrypt | Sign a message with the key's ML-DSA-65 signing key |
+| `/api/verify` | POST | read | Verify an ML-DSA-65 signature |
+| `/api/keys/:id/verifying-key` | GET | read | Fetch a key's ML-DSA-65 public verifying key |
+| `/api/assertions/issue` | POST | encrypt | Issue a signed assertion |
+| `/api/assertions/verify` | POST | read | Verify a signed assertion |
 | `/api/threat` | GET | read | Threat intelligence details |
+| `/api/threat/event` | POST | manage | Inject a threat event (domain-scoped keys are rejected) |
+| `/api/threat/reset` | POST | admin | Reset the adaptive threat level |
 | `/api/policies` | GET | read | Active key policies |
+| `/api/expire` | POST | admin | Expire keys past their expiry time |
 | `/api/auth/whoami` | GET | read | Current API key info |
 | `/api/auth/keys` | GET | admin | List API keys |
 | `/api/auth/keys` | POST | admin | Create API key |

@@ -1,8 +1,27 @@
 # Citadel Envelope Wire Format — Formal Specification
 
 **Version:** 1.0.0  
-**Status:** FINAL  
+**Status:** SUPERSEDED — NON-NORMATIVE (see quarantine notice below)  
 **Date:** 2026-01-28
+
+---
+
+> ## ⚠️ QUARANTINE NOTICE — DO NOT IMPLEMENT FROM THIS DOCUMENT
+>
+> This document describes a v1 key schedule that **was never shipped**. Its HKDF
+> labels (`citadel-hybrid-v1`, `citadel-hybrid-env-v1|aes|`) and two-stage
+> derivation **do not exist anywhere in the Citadel source** — a search of the
+> codebase returns zero matches. Anyone implementing an interoperable encoder
+> from the key schedule below will derive **different AES keys** and produce
+> **ciphertexts that Citadel cannot decrypt**.
+>
+> **The normative v1 wire specification is [`SPEC.md`](SPEC.md).** It matches the
+> shipped `citadel-envelope` crate: a single HKDF-SHA256 derivation with labels
+> `citadel-env-v1` / `citadel-env-v1|aes|`. Implement from `SPEC.md`, not from
+> this file.
+>
+> Everything below this notice is retained for historical reference only and
+> carries no normative weight.
 
 ---
 
