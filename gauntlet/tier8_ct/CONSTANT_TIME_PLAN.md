@@ -1,27 +1,24 @@
 # Tier 8 — Constant-Time as a Proof (not a measurement)
 
-**Status: harness COMPLETE and built; execution blocked on one root install.**
-Done rootless (no sudo): valgrind 3.24.0 built into `~/.local`; the ctgrind harness
-(`ctgrind_harness/`, a C shim over memcheck client requests — no crabgrind/bindgen/
-libclang) compiles; glibc debug symbols fetched via `apt-get download libc6-dbg`
-and extracted to `~/.local/dbgsym`. The ONE remaining blocker: valgrind's mandatory
-`ld-linux` `strcmp` redirection needs those debug symbols in its default
-`/usr/lib/debug` search path, and `--extra-debuginfo-path` did not resolve it —
-placing them there needs root.
+**Status: harness implemented and executed.** The checked-in harness uses a C shim
+over Valgrind Memcheck client requests (no crabgrind/bindgen/libclang). It marks
+only the secret portions of the expanded ML-KEM key, avoiding public-key taint
+false positives. See `../receipts/tier8_ct.txt` for the recorded run and caveats.
 
-**Unblock (either):**
-- `sudo apt-get install -y libc6-dbg` (puts glibc debuginfo where valgrind looks), OR
-- `sudo cp -r ~/.local/dbgsym/usr/lib/debug/* /usr/lib/debug/`
-
-**Then run (harness is ready):**
+**Reproduce:**
 ```bash
 cd gauntlet/tier8_ct/ctgrind_harness
-VALGRIND_INCLUDE=$HOME/.local/include cargo build
-~/.local/bin/valgrind --error-exitcode=1 --track-origins=yes ./target/debug/ctgrind_harness
+VALGRIND_INCLUDE=$HOME/.local/include cargo build --release --locked
+~/.local/bin/valgrind --error-exitcode=1 --track-origins=yes \
+  ./target/release/ctgrind_harness
+# Defined-data baseline; this should report zero errors:
+~/.local/bin/valgrind --error-exitcode=1 --track-origins=yes \
+  ./target/release/ctgrind_harness --control
 ```
-A clean run (ERROR SUMMARY: 0 errors) = no secret-dependent branch/addressing on the
-ML-KEM decap path for that input. Any "Conditional jump ... depends on uninitialised
-value" pinpoints the leaking instruction.
+A clean run is dynamic evidence of no secret-dependent branch/addressing on the
+executed path for that input; it is not a proof over every input or platform. Any
+"Conditional jump ... depends on uninitialised value" or secret-derived invalid
+read pinpoints a candidate leaking instruction for investigation.
 
 ## Why this tier exists
 
@@ -55,16 +52,16 @@ Target: the ML-KEM-768 decapsulation path (`kem::decapsulate` /
 
 ## Expected outcome
 
-Either (a) prove the decap path is constant-time at the instruction level —
-promoting `TIMING.md`'s measured wobble to "not a code-level leak; the effect is
-platform/microarchitectural," or (b) locate the exact secret-dependent branch/access,
-which becomes a concrete fix. Both are strictly better than the current dudect-only
-evidence.
+Either (a) find no violation on the exercised trace, adding instruction-level
+dynamic evidence, or (b) locate a secret-dependent branch/access that becomes a
+concrete fix. A universal proof requires a relational verifier such as
+haybale-pitchfork or Binsec/Rel; ctgrind alone cannot supply one.
 
 ## To run this tier
 
 ```bash
-sudo apt-get install -y valgrind          # unblock ctgrind (2 min)
-# then the ctgrind harness + optional DATA/haybale per above
+sudo apt-get install -y valgrind libc6-dbg
+# then run the optimized harness above; optional DATA/haybale per this plan
 ```
-Grant that (or passwordless sudo) and this tier executes end-to-end.
+Valgrind may also be installed rootlessly; it still needs compatible loader debug
+symbols visible in its debug-info search path.

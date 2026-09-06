@@ -915,11 +915,11 @@ impl Keystore {
         let now = Utc::now();
 
         let (pk, sk) = self.envelope.generate_keypair();
-        let sk_bytes = sk.to_bytes();
+        let sk_bytes = Zeroizing::new(sk.to_bytes());
 
         // V2: decide wrapping strategy based on parent key type.
         let (material, wrapping_key_id, wrapping_key_version) = self
-            .wrap_secret_key_for(&id, 1, parent_id.as_ref(), &sk_bytes)
+            .wrap_secret_key_for(&id, 1, parent_id.as_ref(), &*sk_bytes)
             .await
             .map_err(|e| GenerateError(KeystoreError::StorageError(e)))?;
 
@@ -1070,13 +1070,13 @@ impl Keystore {
         }
 
         let (pk, sk) = self.envelope.generate_keypair();
-        let new_sk_bytes = sk.to_bytes();
+        let new_sk_bytes = Zeroizing::new(sk.to_bytes());
         let new_version_num = meta.current_version + 1;
         let now = Utc::now();
 
         // V2: re-use the same parent for rotation (hierarchy is preserved).
         let (new_material, wrapping_key_id, wrapping_key_version) = self
-            .wrap_secret_key_for(id, new_version_num, meta.parent_id.as_ref(), &new_sk_bytes)
+            .wrap_secret_key_for(id, new_version_num, meta.parent_id.as_ref(), &*new_sk_bytes)
             .await
             .map_err(|e| RotateError(KeystoreError::StorageError(e)))?;
 
@@ -2327,17 +2327,15 @@ impl Keystore {
                 e
             )))
         })?;
-        let seed_bytes: [u8; 32] = *seed_zeroizing;
-
         // Wrap the 32-byte seed using the parent KEK's Citadel public key.
         // wrap_with_citadel_key() takes &[u8] — algorithm-agnostic, works unchanged.
         let (material, wrapping_key_id, wrapping_key_version) = self
-            .wrap_secret_key_for(&id, 1, Some(&parent_id), &seed_bytes)
+            .wrap_secret_key_for(&id, 1, Some(&parent_id), &*seed_zeroizing)
             .await
             .map_err(|e| GenerateError(KeystoreError::StorageError(e)))?;
 
         let wrap_nonce_hex = Self::extract_wrap_nonce(&material);
-        // seed_bytes is [u8; 32] on stack — dropped here. seed_zeroizing (Zeroizing) already zeroized.
+        // `seed_zeroizing` wipes the seed on every return path.
 
         let version = KeyVersion {
             version: 1,

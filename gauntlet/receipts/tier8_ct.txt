@@ -1,4 +1,4 @@
-=== Tier 8: constant-time (ctgrind) — 2026-07-21, Ubuntu WSL2 ===
+=== Tier 8: constant-time (ctgrind) — revalidated 2026-09-06, Ubuntu WSL2 ===
 valgrind 3.24.0 (rootless build) + libc6-dbg (installed) + ctgrind harness.
 Method: mark ML-KEM secret bytes "undefined" via valgrind memcheck client requests,
 run decapsulation; any conditional jump on a secret byte = a CT violation.
@@ -39,20 +39,26 @@ i.e. a TABLE LOOKUP indexed by val.0, which is decoded from the PRF output deriv
 from the (secret) re-encryption coins. So it is a genuine SECRET-INDEXED memory
 access — a real constant-time anti-pattern, NOT a memcheck artifact.
 
-Severity for ML-KEM-768 (the parameter set Citadel uses): PRACTICALLY BENIGN.
+Observed scope for ML-KEM-768 (the parameter set Citadel uses):
 - param.rs: ML-KEM-768 has eta=2 => ONES = Array<Elem, U16> = 16 entries.
-  Elem is u16 => table = 32 bytes, which fits in ONE 64-byte cache line. A
-  secret-indexed access therefore touches the same cache line for every index =>
-  no cache-timing leak on standard hardware.
-- val.0 is a 4-bit decode (0..16) into a 16-entry table => always in range => the
+  Elem is u16 => table = 32 bytes. In the revalidated release ELF, the table is
+  located at virtual/file address 0xa900 (64-byte aligned), so all 16 entries are
+  within one 64-byte cache line in THAT BUILD. Source layout does not guarantee
+  that alignment for every compiler, target, or future build.
+- val.0 is a 4-bit decode (0..15) into a 16-entry table => always in range => the
   bounds-check branch never diverges => no branch-timing leak.
 - (Note: eta=3 would use a 64-entry / 128-byte = TWO-cache-line table, which WOULD
   be a genuine cache-timing leak — but that is ML-KEM-512's eta1, not the 768 set.)
 
+CONTROL: the same optimized binary with no bytes marked undefined (`--control`)
+completed with ERROR SUMMARY: 0 errors from 0 contexts.
+
 CONCLUSION: the ctgrind flag is a REAL CT-hygiene finding in the ml-kem 0.3.2
-dependency (secret-indexed lookup), but for ML-KEM-768 it is not practically
-exploitable (single-cache-line table, always-in-range index) — matching the
-"small effect, not exploitable" conclusion in TIMING.md. It is NOT in Citadel's
-code. Definitive fix would be upstream (mask-based table selection); Citadel's
-options are to accept it (documented, low risk for 768) or pin a future ml-kem
-release that makes CBD sampling branch/index-free.
+dependency (secret-indexed lookup). The exact revalidated x86-64 build confines
+the lookup to one cache line and the bounds branch is invariant for every decoded
+value, which narrows the risk. It does NOT justify a universal "not exploitable"
+claim: source-level alignment is not guaranteed and microarchitectural behavior
+varies. No flagged access was found in Citadel's own envelope/KDF/AEAD/wire code
+on this executed trace. This is dynamic evidence, not an all-input proof.
+Definitive remediation is a branch/index-free upstream CBD implementation (or a
+reviewed patched dependency), followed by the same ctgrind and timing campaigns.

@@ -20,6 +20,8 @@ extern "C" {
 }
 
 fn main() {
+    let control = std::env::args().any(|arg| arg == "--control");
+
     // Well-formed keypair + ciphertext (values are irrelevant to ctgrind; memcheck
     // tracks definedness, not values — we only need the real code path to run).
     let (pk, sk) = Provider::keygen();
@@ -36,14 +38,19 @@ fn main() {
     // sk_bytes = x25519(32) || dk(2400), so within the 2432-byte buffer:
     //   [32 .. 1184)  dk_PKE  (SECRET)   [1184 .. 2368) ek       (public)
     //   [2368 .. 2400) H(ek)  (public)   [2400 .. 2432) z        (SECRET)
-    unsafe {
-        ct_mark_undefined(sk_bytes[32..1184].as_ptr() as *mut c_void, 1152); // dk_PKE
-        ct_mark_undefined(sk_bytes[2400..2432].as_ptr() as *mut c_void, 32); // z
+    if !control {
+        unsafe {
+            ct_mark_undefined(sk_bytes[32..1184].as_ptr() as *mut c_void, 1152); // dk_PKE
+            ct_mark_undefined(sk_bytes[2400..2432].as_ptr() as *mut c_void, 32); // z
+        }
     }
 
     // Operation under test. Do NOT branch on the (secret-derived) result.
     let out = mlkem_decapsulate_from_key_bytes(&sk_bytes, &ct);
     let _ = std::hint::black_box(out);
 
-    eprintln!("ctgrind: ML-KEM decapsulation completed (see valgrind report)");
+    eprintln!(
+        "ctgrind: ML-KEM decapsulation completed ({})",
+        if control { "defined-data control" } else { "secret taint enabled" }
+    );
 }

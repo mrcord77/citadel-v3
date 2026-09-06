@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::process;
 
 use citadel_envelope::{Aad, Citadel, Context, PublicKey, SecretKey};
+use zeroize::Zeroizing;
 
 fn usage() -> ! {
     eprintln!(
@@ -87,8 +88,8 @@ fn cmd_keygen(flags: &[(String, String)]) {
     // Write raw key bytes
     fs::write(&pub_path, pk.to_bytes())
         .unwrap_or_else(|e| die(&format!("write {}: {}", pub_path, e)));
-    fs::write(&sec_path, sk.to_bytes())
-        .unwrap_or_else(|e| die(&format!("write {}: {}", sec_path, e)));
+    let sk_bytes = Zeroizing::new(sk.to_bytes());
+    fs::write(&sec_path, &*sk_bytes).unwrap_or_else(|e| die(&format!("write {}: {}", sec_path, e)));
 
     eprintln!("keypair generated:");
     eprintln!(
@@ -96,11 +97,7 @@ fn cmd_keygen(flags: &[(String, String)]) {
         pub_path,
         pk.to_bytes().len()
     );
-    eprintln!(
-        "  secret key:  {} ({} bytes)",
-        sec_path,
-        sk.to_bytes().len()
-    );
+    eprintln!("  secret key:  {} ({} bytes)", sec_path, sk_bytes.len());
     eprintln!();
     eprintln!("keep {0} safe. share {1} freely.", sec_path, pub_path);
 }
@@ -119,7 +116,9 @@ fn cmd_seal(flags: &[(String, String)]) {
     let pk = PublicKey::from_bytes(&pk_bytes).unwrap_or_else(|_| die("invalid public key file"));
 
     // Load plaintext
-    let plaintext = fs::read(&in_file).unwrap_or_else(|e| die(&format!("read {}: {}", in_file, e)));
+    let plaintext = Zeroizing::new(
+        fs::read(&in_file).unwrap_or_else(|e| die(&format!("read {}: {}", in_file, e))),
+    );
 
     // Encrypt
     let citadel = Citadel::new();
@@ -163,8 +162,9 @@ fn cmd_open(flags: &[(String, String)]) {
     }
 
     // Load secret key
-    let sk_bytes =
-        fs::read(&key_file).unwrap_or_else(|e| die(&format!("read {}: {}", key_file, e)));
+    let sk_bytes = Zeroizing::new(
+        fs::read(&key_file).unwrap_or_else(|e| die(&format!("read {}: {}", key_file, e))),
+    );
     let sk = SecretKey::from_bytes(&sk_bytes).unwrap_or_else(|_| die("invalid secret key file"));
 
     // Load ciphertext
@@ -175,11 +175,9 @@ fn cmd_open(flags: &[(String, String)]) {
     let citadel = Citadel::new();
     let aad = Aad::raw(aad_str.as_bytes());
     let ctx = Context::raw(ctx_str.as_bytes());
-    let plaintext = citadel
-        .open(&sk, &ciphertext, &aad, &ctx)
-        .unwrap_or_else(|_| {
-            die("decryption failed (wrong key, corrupted, or mismatched aad/context)")
-        });
+    let plaintext = Zeroizing::new(citadel.open(&sk, &ciphertext, &aad, &ctx).unwrap_or_else(
+        |_| die("decryption failed (wrong key, corrupted, or mismatched aad/context)"),
+    ));
 
     // Write plaintext
     fs::write(&out_file, &plaintext).unwrap_or_else(|e| die(&format!("write {}: {}", out_file, e)));

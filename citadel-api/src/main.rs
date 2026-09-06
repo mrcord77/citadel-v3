@@ -4105,6 +4105,54 @@ mod integration {
     // ── Adversarial ───────────────────────────────────────────────────────
 
     #[tokio::test]
+    async fn it_decrypt_failures_are_opaque_and_floored() {
+        let app = test_app().await;
+        let cases = [
+            Body::from("not json"),
+            Body::from("{}"),
+            Body::from(
+                serde_json::json!({
+                    "blob": {
+                        "key_id": "missing-key",
+                        "key_version": 1,
+                        "ciphertext_hex": "00",
+                        "encrypted_at": "2026-09-06T00:00:00Z"
+                    },
+                    "aad": "",
+                    "context": ""
+                })
+                .to_string(),
+            ),
+        ];
+
+        for body in cases {
+            let started = std::time::Instant::now();
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/decrypt")
+                        .header("authorization", auth(API_KEY_PLAIN))
+                        .header("content-type", "application/json")
+                        .body(body)
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let elapsed = started.elapsed();
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let response_body = json(response).await;
+            assert_eq!(response_body["error"], "operation failed");
+            assert!(
+                elapsed >= std::time::Duration::from_millis(9),
+                "decrypt failure bypassed the 10ms response floor: {elapsed:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn it_malformed_json_returns_4xx() {
         let app = test_app().await;
         let r = app

@@ -3,9 +3,9 @@
 # libclang — only gcc + valgrind headers). memcheck then reports any branch or
 # memory access that depends on a secret byte = a constant-time violation.
 #
-# Build:  VALGRIND_INCLUDE=$HOME/.local/include cargo build
+# Build:  VALGRIND_INCLUDE=$HOME/.local/include cargo build --release --locked
 # Run:    ~/.local/bin/valgrind --error-exitcode=1 --track-origins=yes \
-#           ./target/debug/ctgrind_harness
+#           ./target/release/ctgrind_harness
 [package]
 name = "ctgrind_harness"
 version = "0.0.0"
@@ -16,7 +16,7 @@ build = "build.rs"
 [workspace]
 
 [dependencies]
-citadel-envelope = { path = "../../../citadel-envelope" }
+citadel-envelope = { path = "../../../citadel-envelope", features = ["timing-diagnostics"] }
 
 [build-dependencies]
 cc = "1"

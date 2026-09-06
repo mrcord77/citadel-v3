@@ -239,7 +239,7 @@ impl fmt::Display for KeyState {
 /// - `CitadelWrapped(s)` → `s` (starts with `"ckw:"`)
 /// - `Plaintext(s)`      → `s` (hex string)
 /// - `Destroyed`         → `"DESTROYED"`
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum SecretKeyMaterial {
     /// AES-256-GCM encrypted at rest using CITADEL_MASTER_KEY.
     /// Format: `"enc:" + hex(nonce[12]) + hex(aes_gcm_ciphertext)`.
@@ -253,6 +253,27 @@ pub enum SecretKeyMaterial {
     Plaintext(String),
     /// Key material has been purged by `Keystore::destroy()`.
     Destroyed,
+}
+
+impl fmt::Debug for SecretKeyMaterial {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Encrypted(_) => f.write_str("Encrypted([REDACTED])"),
+            Self::CitadelWrapped(_) => f.write_str("CitadelWrapped([REDACTED])"),
+            Self::Plaintext(_) => f.write_str("Plaintext([REDACTED])"),
+            Self::Destroyed => f.write_str("Destroyed"),
+        }
+    }
+}
+
+impl Drop for SecretKeyMaterial {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        match self {
+            Self::Encrypted(s) | Self::CitadelWrapped(s) | Self::Plaintext(s) => s.zeroize(),
+            Self::Destroyed => {}
+        }
+    }
 }
 
 impl SecretKeyMaterial {
@@ -309,6 +330,24 @@ impl<'de> serde::Deserialize<'de> for SecretKeyMaterial {
         } else {
             // Legacy plaintext hex — treat as Plaintext.
             Ok(Self::Plaintext(raw))
+        }
+    }
+}
+
+#[cfg(test)]
+mod secret_material_tests {
+    use super::SecretKeyMaterial;
+
+    #[test]
+    fn debug_never_exposes_key_material() {
+        for material in [
+            SecretKeyMaterial::Encrypted("enc:super-secret".into()),
+            SecretKeyMaterial::CitadelWrapped("ckw:super-secret".into()),
+            SecretKeyMaterial::Plaintext("super-secret".into()),
+        ] {
+            let rendered = format!("{material:?}");
+            assert!(rendered.contains("[REDACTED]"));
+            assert!(!rendered.contains("super-secret"));
         }
     }
 }

@@ -144,8 +144,10 @@ the ciphertext, and the ciphertext-variation classes pass.
 > 0.3.2 (pure Rust). It largely follows constant-time discipline; a ctgrind
 > (valgrind) analysis localized one secret-indexed table lookup (`Eta::ONES[val]`)
 > in the crate's CBD noise sampling. For the ML-KEM-768 parameter set that table
-> is 32 bytes — a single cache line, with an always-in-range index — so it is not
-> practically exploitable, though it remains a constant-time anti-pattern in the
+> is 32 bytes and, in the tested release ELF, was wholly contained in one aligned
+> 64-byte cache line; its 4-bit index is always in range. That narrows the observed
+> x86-64 risk but does not prove safety across compilers, targets, or
+> microarchitectures. It remains a constant-time anti-pattern in the
 > dependency (see `gauntlet/tier8_ct/`). Our dudect-based timing
 > validation suite passes all attacker-controlled-input classes (ciphertext
 > variation, tag corruption, AAD corruption, KEM-byte corruption).
@@ -153,7 +155,7 @@ the ciphertext, and the ciphertext-variation classes pass.
 > Key-value-dependent decapsulation timing is detectable at the microbenchmark
 > level on tested x86-64 hardware, reproduced across three independently
 > developed ML-KEM implementations (PQClean, libcrux, AWS-LC). Source
-> inspection found no code-level constant-time violations; the effect is
+> inspection found the dependency-level lookup above; otherwise the effect is
 > consistent with hardware-level data-dependent execution
 > (Hertzbleed-class). This is documented as a known platform-level
 > limitation. We do not claim constant-time validation or side-channel
