@@ -6,10 +6,13 @@
 //! it is exportable and its key is present in process memory while the keystore
 //! is running. It is not an HSM, TPM, kernel keyring, or remote KMS.
 
+#[cfg(target_os = "linux")]
 use rand_core::{OsRng, RngCore};
 use std::collections::HashMap;
 use std::fmt;
+#[cfg(target_os = "linux")]
 use std::fs::{self, File, OpenOptions};
+#[cfg(target_os = "linux")]
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
@@ -156,6 +159,7 @@ impl RootKeyProvider for LinuxFileRootKeyProvider {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn validate_key_material(key: &[u8]) -> Result<(), RootKeyError> {
     let unique = key
         .iter()

@@ -89,7 +89,8 @@ fn cmd_keygen(flags: &[(String, String)]) {
     fs::write(&pub_path, pk.to_bytes())
         .unwrap_or_else(|e| die(&format!("write {}: {}", pub_path, e)));
     let sk_bytes = Zeroizing::new(sk.to_bytes());
-    fs::write(&sec_path, &*sk_bytes).unwrap_or_else(|e| die(&format!("write {}: {}", sec_path, e)));
+    fs::write(&sec_path, sk_bytes.as_slice())
+        .unwrap_or_else(|e| die(&format!("write {}: {}", sec_path, e)));
 
     eprintln!("keypair generated:");
     eprintln!(
