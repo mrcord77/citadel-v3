@@ -259,26 +259,11 @@ impl ReplayStore for MemoryReplayStore {
 ///
 /// ## P001/P014: Write Batching and Durability Guarantees
 ///
-/// **Performance optimization**: Claims are batched in memory and flushed when:
-/// - 100 operations accumulated since last flush, OR
-/// - 5 seconds elapsed since last flush, OR
-/// - Entry count exceeds 10,000 (warning) or 50,000 (backpressure)
-///
-/// **DURABILITY GUARANTEE**: Claims are durable ONLY after flush().
-/// Unflushed claims exist only in memory and are LOST on crash.
-///
-/// **Replay window**: Between flushes, there is a window of up to:
-/// - 5 seconds (time-based), OR
-/// - 100 operations (count-based)
-///   during which a crash allows replay of decrypted ciphertexts.
-///
-/// **Mitigation strategies**:
-/// 1. Implement graceful shutdown: Call `force_flush()` in SIGTERM handler (see P010)
-/// 2. For strict replay protection: Use `RedisReplayStore` with AOF enabled
-/// 3. For critical operations: Call `force_flush()` manually (performance cost)
-///
-/// **Not appropriate for multi-instance deployments** (file-level race conditions).
-/// Use `RedisReplayStore` for distributed systems.
+/// Every successful claim is synchronized to disk before it is acknowledged.
+/// Atomic replacement plus parent-directory fsync provides restart/crash durability
+/// on Unix filesystems that honor fsync. There is no batching or idle flush window.
+/// This trades throughput for durability; the complete live set is rewritten per claim.
+/// The file backend remains single-process only. Use Redis for distributed deployments.
 pub struct FileReplayStore {
     path: PathBuf,
     default_ttl_secs: u64,
@@ -287,14 +272,10 @@ pub struct FileReplayStore {
     mirror: std::sync::Mutex<FileReplayInner>,
 }
 
-/// P001: Inner state with batching counters
+/// In-memory mirror, serialized with its durable snapshot.
 struct FileReplayInner {
     /// key → unix_seen_at
     claims: HashMap<Vec<u8>, u64>,
-    /// Operations since last flush (for batching)
-    ops_since_flush: usize,
-    /// Last flush timestamp (for time-based batching)
-    last_flush: Instant,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -359,11 +340,7 @@ impl FileReplayStore {
             path,
             default_ttl_secs,
             fail_closed,
-            mirror: std::sync::Mutex::new(FileReplayInner {
-                claims,
-                ops_since_flush: 0,
-                last_flush: Instant::now(),
-            }),
+            mirror: std::sync::Mutex::new(FileReplayInner { claims }),
         })
     }
 
@@ -420,114 +397,39 @@ impl FileReplayStore {
             // file handle drops and closes here — before rename
         }
 
-        // P437: Windows rename fails if destination already exists.
-        // Remove destination first on Windows to ensure rename succeeds.
-        #[cfg(windows)]
-        if self.path.exists() {
-            std::fs::remove_file(&self.path).map_err(|e| {
-                ReplayError::new(format!(
-                    "replay remove old file '{}': {}",
-                    self.path.display(),
-                    e
-                ))
-            })?;
+        // Never unlink the destination first: that creates a crash window in which
+        // all prior replay claims disappear. std::fs::rename replaces the destination.
+        std::fs::rename(&tmp, &self.path)
+            .map_err(|e| ReplayError::new(format!("replay atomic rename: {e}")))?;
+        // The file contents and the replacement directory entry must both be durable.
+        #[cfg(unix)]
+        {
+            let parent = self
+                .path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or_else(|| std::path::Path::new("."));
+            std::fs::File::open(parent)
+                .and_then(|dir| dir.sync_all())
+                .map_err(|e| ReplayError::new(format!("replay directory fsync: {e}")))?;
         }
-
-        // Atomic rename — replay.json never seen in partial state
-        std::fs::rename(&tmp, &self.path).map_err(|e| {
-            ReplayError::new(format!(
-                "replay atomic rename '{}' -> '{}': {}",
-                tmp.display(),
-                self.path.display(),
-                e
-            ))
-        })
-    }
-
-    /// P001: Check if flush is needed based on batching criteria.
-    ///
-    /// Flush when:
-    /// - >= 100 operations accumulated, OR
-    /// - >= 5 seconds since last flush, OR
-    /// - >= 10,000 entries (warning threshold)
-    fn should_flush(&self, inner: &FileReplayInner) -> bool {
-        const BATCH_SIZE: usize = 100;
-        const BATCH_INTERVAL_SECS: u64 = 5;
-        const HIGH_WATER_MARK: usize = 10_000;
-
-        let ops_trigger = inner.ops_since_flush >= BATCH_SIZE;
-        let time_trigger = inner.last_flush.elapsed().as_secs() >= BATCH_INTERVAL_SECS;
-        let high_water_trigger = inner.claims.len() >= HIGH_WATER_MARK;
-
-        ops_trigger || time_trigger || high_water_trigger
-    }
-
-    /// P010: Force immediate flush of all pending claims.
-    ///
-    /// Called during graceful shutdown to ensure no claims are lost.
-    /// Applications should call this in response to SIGTERM/SIGINT.
-    ///
-    /// # Example
-    ///
-    /// Illustrative only -- `signal_hook` is not a dependency of this crate, so this
-    /// snippet is not compiled as a doctest (`ignore`), just Unix-signal-handling shape.
-    /// ```ignore
-    /// use signal_hook::{consts::SIGTERM, iterator::Signals};
-    /// use std::sync::Arc;
-    ///
-    /// fn setup_shutdown_handler(replay_store: Arc<FileReplayStore>) {
-    ///     let mut signals = Signals::new(&[SIGTERM]).unwrap();
-    ///     std::thread::spawn(move || {
-    ///         for sig in signals.forever() {
-    ///             if sig == SIGTERM {
-    ///                 eprintln!("SIGTERM received, flushing replay cache...");
-    ///                 if let Err(e) = replay_store.force_flush() {
-    ///                     eprintln!("Error flushing replay cache: {}", e);
-    ///                 }
-    ///                 std::process::exit(0);
-    ///             }
-    ///         }
-    ///     });
-    /// }
-    /// ```
-    pub fn force_flush(&self) -> Result<(), ReplayError> {
-        let mut inner = self
-            .mirror
-            .lock()
-            .map_err(|e| ReplayError::new(format!("force_flush lock poisoned: {}", e)))?;
-        self.flush(&inner)?;
-        inner.ops_since_flush = 0;
-        inner.last_flush = Instant::now();
         Ok(())
     }
-}
 
-impl Drop for FileReplayStore {
-    /// Best-effort flush on drop. Without this, ANY shutdown that isn't an explicit
-    /// SIGTERM handler calling force_flush() — a normal process exit, an unwinding
-    /// panic, or simply this struct going out of scope — silently lost up to
-    /// BATCH_SIZE ops / BATCH_INTERVAL_SECS worth of pending replay claims. That's a
-    /// strictly bigger gap than the documented "SIGKILL/crash window": it fired on
-    /// every graceful shutdown that didn't happen to wire up the SIGTERM example from
-    /// this file's own doc comment. force_flush() remains the explicit,
-    /// error-propagating path for callers that need to know the flush succeeded.
-    fn drop(&mut self) {
-        if let Ok(inner) = self.mirror.lock() {
-            if let Err(e) = self.flush(&inner) {
-                tracing::warn!(error = %e, "FileReplayStore: flush on drop failed — pending replay claims may be lost");
-            }
-        }
+    /// Synchronize the current snapshot explicitly. Kept for API compatibility;
+    /// successful claim/release calls already persist their changes before returning.
+    pub fn force_flush(&self) -> Result<(), ReplayError> {
+        let inner = self
+            .mirror
+            .lock()
+            .map_err(|e| ReplayError::new(format!("force_flush lock poisoned: {e}")))?;
+        self.flush(&inner)
     }
 }
 
 impl ReplayStore for FileReplayStore {
-    /// P319/P001: Atomic claim with write batching to prevent DoS.
-    ///
-    /// Claims are always recorded in memory immediately (atomic replay protection).
-    /// Flush to disk happens only when batching criteria are met:
-    /// - 100 operations since last flush, OR
-    /// - 5 seconds since last flush, OR
-    /// - 10,000 total entries (high-water mark)
+    /// Atomically reserve and durably persist a claim before allowing decryption.
+    /// On an I/O error retain the reservation: the on-disk outcome may be uncertain.
     fn claim(&self, key: &[u8], _ttl: Duration) -> Result<bool, ReplayError> {
         // P409: Fail-closed on lock poison — never panic during replay enforcement
         let mut inner = self
@@ -546,40 +448,25 @@ impl ReplayStore for FileReplayStore {
 
         // Claim the slot in memory (always immediate)
         inner.claims.insert(key.to_vec(), unix_now());
-        inner.ops_since_flush += 1;
-
-        // P001: Conditional flush based on batching criteria
-        if self.should_flush(&inner) {
-            // P161: flush must propagate write errors — fail-closed on flush failure.
-            if let Err(e) = self.flush(&inner) {
-                inner.claims.remove(key); // rollback the in-memory insert
-                return Err(e);
-            }
-            // Reset batching counters after successful flush
-            inner.ops_since_flush = 0;
-            inner.last_flush = Instant::now();
-        }
-        // P001: If flush not needed yet, claim is held in memory only.
-        // This is safe because replay protection is enforced in-memory immediately.
-        // The flush happens later based on batching criteria.
+        self.flush(&inner)?;
 
         Ok(true) // slot claimed
     }
 
-    /// P319/P001: Release on decrypt failure — always flushes immediately.
-    ///
-    /// This cannot be batched because release() is rare (only on decrypt failure)
-    /// and must be durable immediately to prevent ciphertext poisoning attack.
+    /// Release only after a failed decrypt. If persistence fails, restore the
+    /// in-memory reservation rather than allowing reuse on an uncertain disk outcome.
     fn release(&self, key: &[u8]) -> Result<(), ReplayError> {
         let mut inner = self
             .mirror
             .lock()
-            .map_err(|e| ReplayError::new(format!("file replay mirror lock poisoned: {}", e)))?;
-        inner.claims.remove(key);
-        // P001: Release always flushes immediately (can't be batched)
-        self.flush(&inner)?;
-        inner.ops_since_flush = 0;
-        inner.last_flush = Instant::now();
+            .map_err(|e| ReplayError::new(format!("file replay mirror lock poisoned: {e}")))?;
+        let previous = inner.claims.remove(key);
+        if let Err(error) = self.flush(&inner) {
+            if let Some(timestamp) = previous {
+                inner.claims.insert(key.to_vec(), timestamp);
+            }
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -1034,16 +921,12 @@ mod file_replay_tests {
         let store = FileReplayStore::new(&path, Duration::from_secs(3600), true)
             .expect("test: file replay store");
 
-        // Claim a nonce. P001 batches writes (100 ops / 5s / 10K entries) precisely
-        // to avoid fsync-per-decrypt DoS, so a single claim is NOT expected to hit
-        // disk immediately — force_flush() (the same call a SIGTERM handler makes)
-        // is what actually guarantees on-disk state, and is what we assert against.
+        // Successful claims are durable without a separate force_flush call.
         let key1 = b"nonce-before-delete";
         store.claim(key1, Duration::from_secs(3600)).unwrap();
-        store.force_flush().expect("force_flush");
         assert!(
             std::path::Path::new(&path).exists(),
-            "file must exist after claim + flush"
+            "file must exist after claim"
         );
         // Second claim must fail (replay)
         assert!(

@@ -1,95 +1,62 @@
 # Citadel V3 — Replay Store Guarantees
 
-> **Update:** ReplayStore now uses atomic `claim()+release()` instead of the old `claim()+release()` two-step. `claim()` is check-and-insert under a single lock — no race window. `release()` frees the slot only on decrypt failure (anti-poisoning). Successful decrypt keeps the claim permanently until TTL.
+A replay claim is atomic: `claim()` checks and reserves a fingerprint under one lock.
+`Ok(true)` means the caller may proceed; `Ok(false)` means replay; `Err` means storage
+failure and decryption must not proceed. A failed decrypt releases its claim.
 
-## What the Replay Store Does
+## FileReplayStore
 
-The replay store prevents ciphertext reuse attacks. Every decryption records a
-nonce fingerprint. If the same blob is submitted again, the store returns
-`claim()` returns `Ok(false)` and decryption is rejected before any key material is accessed.
+The file backend is single-process only. Every successful claim persists the complete
+live snapshot to a temporary file, synchronizes it, atomically replaces `replay.json`,
+and on Unix synchronizes the parent directory before returning. The destination is
+never deleted before replacement. There is no batching or five-second idle window.
 
----
+Acknowledged claims survive ordinary restart and abrupt process termination while
+within the configured TTL, assuming a Unix filesystem/storage stack honoring fsync.
+Power-loss durability depends on that storage contract; Windows crash durability has
+not been verified by the Linux tests. SIGTERM/SIGINT handling drains active HTTP
+requests, but replay durability does not depend on that handler or destructors.
 
-## FileReplayStore — Guarantees and Limitations
+A claim-write error is returned to the caller. Its in-memory reservation is retained
+conservatively because a failed sync can leave an uncertain disk outcome. Release
+errors restore the in-memory reservation. This favors replay safety over retry
+availability. A process can also crash after persisting a claim but before returning
+plaintext: that ciphertext remains consumed even if the caller received no response.
 
-### Guarantees
+`force_flush()` remains available for compatibility; claim/release already persist
+before returning. Rewriting the live snapshot and synchronizing each mutation costs
+more than batching. Measure expected workload and storage latency before deployment.
 
-- Nonces claimed in process memory are persisted to `replay.json` on disk
-- After a clean restart, previously claimed nonces are recognized and rejected
-- Fail-closed: if the store cannot be read at startup, the server exits (exit 1)
-- Fail-closed: if a write fails, the error is returned to the caller (not silently dropped)
-- 10,000+ entries remain consistent (proven by `file_store_large_entry_count_remains_consistent`)
+### Startup and corruption
 
-### Limitations
+| Condition | Behavior |
+| --- | --- |
+| Missing file | Empty store, as on first startup |
+| Invalid/truncated JSON | Startup error |
+| Invalid key encoding in a live entry | Startup error |
+| Read failure | Startup error |
+| Write/sync/rename failure during claim | Error; plaintext not returned |
 
-**SINGLE-PROCESS ONLY**
+Missing files cannot be distinguished from a fresh deployment by this format.
+Deleting or restoring an old replay file can erase claims; protect it accordingly.
+Expired entries are removed from the memory mirror during claims and omitted from
+persisted snapshots. The configured default TTL controls file entries.
 
-FileReplayStore does not use cross-process file locking. Two API instances
-sharing the same `replay.json` file may both see `claim()=true` for the same
-nonce and both successfully decrypt the same ciphertext.
+Two processes must not share this file: the mutex is process-local, not a distributed
+lock. Use a suitably configured distributed backend for multiple API instances.
 
-This means:
-- FileReplayStore is safe for single-instance deployments
-- FileReplayStore is NOT safe for multi-instance or load-balanced deployments
-- Redis replay backend (`CITADEL_REPLAY_STORE=redis`) is required for multi-instance
+## Memory and Redis
 
-**APPEND-ONLY (NO EVICTION)**
+Memory replay protection is for explicit development/testing and disappears on restart.
+Redis requires the `redis-backend` build feature and `CITADEL_REPLAY_STORE=redis`.
+Its restart and failover guarantees depend on Redis persistence/replication settings.
+This patch does not change or independently validate Redis behavior.
 
-FileReplayStore does not evict expired entries from disk. The `replay.json` file
-grows continuously with traffic. For long-running deployments:
-- Monitor `replay.json` file size
-- Use Redis backend for bounded storage (TTL-based eviction)
-- Or schedule periodic maintenance to prune expired entries
+## Regression checks
 
----
+- `cargo test -p citadel-keystore --test restart_durability --locked`
+- `python3 scripts/security/restart_durability.py target/debug/citadel-api`
 
-## Corruption Semantics
-
-| Scenario | Behavior |
-|----------|----------|
-| Truncated `replay.json` | Safe recovery (starts fresh) or fail-closed |
-| Invalid JSON `replay.json` | Safe recovery (starts fresh) or fail-closed |
-| Missing `replay.json` at startup | **Fails startup (exit 1)** — fail-closed |
-| Permission denied reading | Fail-closed expected |
-| Permission denied writing | Returns error — operation rejected |
-
-The server does NOT silently recreate an empty replay store after corruption
-unless the operator explicitly deletes the file and restarts.
-
----
-
-## MemoryReplayStore
-
-Used in tests only. Not persistent across restarts. Entries are evicted when TTL expires.
-
----
-
-## RedisReplayStore
-
-Required for production multi-instance deployment.
-- Set `CITADEL_REPLAY_STORE=redis`
-- Set `CITADEL_REDIS_URL=redis://...`
-- Redis TTL provides automatic eviction
-- Cross-process atomicity via `SET NX EX` (atomic compare-and-set)
-
----
-
-## Promotion Gates
-
-### Alpha Freeze Gate: PASSED
-- Single-instance replay protection: ✅ proven
-- Restart durability: ✅ proven
-- Fail-closed on missing store: ✅ proven
-
-### Hardened Alpha Gate: PENDING
-- Multi-process replay behavior: documented (not safe without Redis)
-- Corruption semantics: ✅ tested
-- Replay-spam concurrency: ✅ proven (100 concurrent)
-
-### Beta Gate: PENDING
-- Redis multi-instance validation required
-- Production load testing required
-
----
-
-*Last updated: 2026-05-02 | citadel-v3-beta-001*
+The HTTP check covers idle SIGTERM, immediate SIGKILL, storage errors, exactly-one
+concurrent decrypt, and ordinary key/signature/domain behavior. Physical power-loss
+and multi-process tests are outside these checks.

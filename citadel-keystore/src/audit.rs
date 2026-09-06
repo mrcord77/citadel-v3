@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+#[path = "audit_file.rs"]
+mod audit_file;
+
 // ---------------------------------------------------------------------------
 // Audit events
 // ---------------------------------------------------------------------------
@@ -216,6 +219,18 @@ impl AuditEvent {
 /// For async sinks, use interior mutability (e.g., channel-based).
 pub trait AuditSinkSync: Send + Sync {
     fn record(&self, event: AuditEvent);
+
+    /// Expose a latched sink failure to request/operation boundaries.
+    fn check_health(&self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Fallible append for sinks that can report storage failures. The default
+    /// preserves compatibility with existing best-effort third-party sinks.
+    fn try_record(&self, event: AuditEvent) -> std::io::Result<()> {
+        self.record(event);
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -302,40 +317,25 @@ impl FileAuditSink {
 
 impl AuditSinkSync for FileAuditSink {
     fn record(&self, event: AuditEvent) {
-        use std::io::Write;
-        let opts = {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                let mut o = std::fs::OpenOptions::new();
-                o.create(true).append(true).mode(0o600);
-                o
-            }
-            #[cfg(not(unix))]
-            {
-                let mut o = std::fs::OpenOptions::new();
-                o.create(true).append(true);
-                o
-            }
-        };
-        match opts.open(&self.path) {
-            Ok(mut file) => match serde_json::to_string(&event) {
-                Ok(json) => {
-                    if let Err(e) = writeln!(file, "{}", json) {
-                        eprintln!("[audit] write error: {}", e);
-                    }
-                }
-                Err(e) => eprintln!("[audit] serialize error: {}", e),
-            },
-            Err(e) => {
-                eprintln!(
-                    "[audit] cannot open {:?}: {} (cwd: {:?})",
-                    self.path,
-                    e,
-                    std::env::current_dir().unwrap_or_default()
-                );
-            }
+        if let Err(error) = self.try_record(event) {
+            tracing::error!(%error, "audit append failed");
         }
+    }
+
+    fn try_record(&self, event: AuditEvent) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(&self.path)?;
+        let mut bytes = serde_json::to_vec(&event).map_err(std::io::Error::other)?;
+        bytes.push(b'\n');
+        file.write_all(&bytes)?;
+        file.sync_all()
     }
 }
 
@@ -363,6 +363,9 @@ pub struct IntegrityChainSink {
 struct ChainState {
     sequence: u64,
     prev_hash: String,
+    // An append failure can leave a partial record. Do not append past it until
+    // the file is validated again on restart or explicitly recovered by an operator.
+    failed: bool,
 }
 
 impl IntegrityChainSink {
@@ -397,6 +400,7 @@ impl IntegrityChainSink {
             state: std::sync::Mutex::new(ChainState {
                 sequence: 0,
                 prev_hash: genesis,
+                failed: false,
             }),
             witness,
             anchor_interval,
@@ -405,51 +409,70 @@ impl IntegrityChainSink {
 }
 
 impl AuditSinkSync for IntegrityChainSink {
-    fn record(&self, mut event: AuditEvent) {
+    fn check_health(&self) -> std::io::Result<()> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| std::io::Error::other("audit chain lock poisoned"))?;
+        if state.failed {
+            return Err(std::io::Error::other(
+                "audit append failed; operator recovery required",
+            ));
+        }
+        self.inner.check_health()
+    }
+
+    fn record(&self, event: AuditEvent) {
+        if let Err(error) = self.try_record(event) {
+            // Existing record() callers remain best effort. Fallible callers can
+            // use try_record(); never conceal a failed file append from the chain.
+            tracing::error!(%error, "audit chain append failed; chain requires recovery");
+        }
+    }
+
+    fn try_record(&self, mut event: AuditEvent) -> std::io::Result<()> {
         use sha2::{Digest, Sha256};
-
-        let mut state = self.state.lock().unwrap();
-
-        // Stamp the event with chain metadata
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| std::io::Error::other("audit chain lock poisoned"))?;
+        if state.failed {
+            return Err(std::io::Error::other(
+                "audit chain halted after append failure",
+            ));
+        }
+        let next_sequence = state
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("audit sequence exhausted"))?;
         event.sequence = Some(state.sequence);
         event.prev_hash = Some(state.prev_hash.clone());
+        let json = serde_json::to_vec(&event).map_err(std::io::Error::other)?;
+        let next_hash = format!("{:x}", Sha256::digest(&json));
 
-        // Compute this event's hash for the next link
-        // Hash is computed over the complete event JSON (including sequence + prev_hash)
-        if let Ok(json) = serde_json::to_string(&event) {
-            state.prev_hash = format!("{:x}", Sha256::digest(json.as_bytes()));
+        // Keep the chain lock through the append. Releasing it before forwarding
+        // lets concurrent writers put correctly numbered events in the wrong order.
+        if let Err(error) = self.inner.try_record(event) {
+            state.failed = true;
+            return Err(error);
         }
+        state.prev_hash = next_hash;
+        let recorded_sequence = state.sequence;
+        state.sequence = next_sequence;
 
-        // P007: Publish to external witness at anchor intervals
-        if state.sequence > 0 && state.sequence % self.anchor_interval == 0 {
+        // Only witness events that have actually been accepted by the inner sink.
+        if recorded_sequence > 0
+            && self.anchor_interval > 0
+            && recorded_sequence % self.anchor_interval == 0
+        {
             if let Some(ref witness) = self.witness {
-                let hash_bytes = hex::decode(&state.prev_hash).unwrap_or_default();
-                match witness.publish_hash(state.sequence, &hash_bytes) {
-                    Ok(receipt) => {
-                        tracing::info!(
-                            sequence = state.sequence,
-                            hash = %state.prev_hash,
-                            witness_id = %receipt.witness_id,
-                            timestamp = %receipt.timestamp,
-                            "audit hash anchored to external witness"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            sequence = state.sequence,
-                            error = %e,
-                            "failed to anchor audit hash - continuing with local chain"
-                        );
-                        // Don't fail the operation - witness is defense in depth
-                    }
+                let hash_bytes = hex::decode(&state.prev_hash).map_err(std::io::Error::other)?;
+                if let Err(error) = witness.publish_hash(recorded_sequence, &hash_bytes) {
+                    tracing::error!(%error, "failed to anchor audit hash; local chain retained");
                 }
             }
         }
-
-        state.sequence += 1;
-
-        drop(state); // Release lock before forwarding
-        self.inner.record(event);
+        Ok(())
     }
 }
 

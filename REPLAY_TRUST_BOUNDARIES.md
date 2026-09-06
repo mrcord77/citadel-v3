@@ -1,238 +1,60 @@
 # Replay Protection Trust Boundaries
 
-## Overview
+## Actual configuration
 
-Citadel v3 provides replay protection with **backend-dependent durability guarantees**.
-Understanding these trust boundaries is critical for threat modeling.
+| Backend | Configuration | Durability boundary |
+| --- | --- | --- |
+| Memory | Explicit `CITADEL_ENV=development`, replay store unset | Process lifetime only |
+| File | `CITADEL_REPLAY_STORE=file` | Every acknowledged claim synced before decryption proceeds |
+| Redis | `CITADEL_REPLAY_STORE=redis`, feature enabled and URL configured | Depends on Redis persistence and failover configuration |
 
-## Replay Backends and Their Guarantees
+`CITADEL_REPLAY_BACKEND` and `CITADEL_REPLAY_FLUSH_MODE` are not configuration knobs
+implemented by this API. Previous references to selectable batched/strict file modes
+were inaccurate. The repaired file backend always persists claims synchronously.
 
-### 1. MemoryReplayStore (Development Only)
+## File-backed deployment
 
-**Durability**: None  
-**Crash Behavior**: All claims lost on restart  
-**Trust Model**: Development/testing only
+A claim is reserved under the mirror mutex, written to a temporary snapshot, synced,
+renamed over the existing snapshot, and followed by parent-directory fsync on Unix.
+Only then may decryption proceed. Replay attempts already present in memory are denied.
+There is no need for subsequent traffic, an idle timer, or a destructor to save claims.
 
-```rust
-CITADEL_REPLAY_BACKEND=memory
-```
+Tests cover normal SIGTERM shutdown after an idle interval and immediate SIGKILL after
+a successful response. They do not simulate physical power failure or certify storage
+hardware. The Unix durability claim assumes that the filesystem and device honor
+sync operations. Windows process/crash behavior remains unverified here.
 
-**Use For**:
-- Local development
-- Unit testing
-- Integration testing
+If a write fails, no successful claim is returned; uncertain claims stay reserved in
+memory. If a failed-decrypt release cannot be persisted, its reservation is restored.
+A crash between durable reservation and delivery of plaintext can consume a message
+without the caller receiving it. This is an explicit safety/availability tradeoff.
 
-**Do NOT Use For**:
-- Any production deployment
-- Any system requiring restart safety
+The complete live set is rewritten per mutation. This increases I/O and serialization
+cost versus batching; no throughput figure is promised. A future journal/transactional
+backend must preserve durable-before-acknowledgment semantics.
 
----
+## What this does not protect
 
-### 2. FileReplayStore (Batched Mode - Default)
+- Multiple API processes sharing one replay file: no cross-process locking exists.
+- Host compromise, file deletion, rollback to an older snapshot, or malicious editing.
+- Loss of data that the underlying filesystem/device claimed was synchronized.
+- Replay after expiration of the configured retention period.
 
-**Durability**: After flush only  
-**Crash Window**: Up to 5 seconds OR 100 operations  
-**Trust Model**: Best-effort durability with bounded crash window
+A missing replay file initializes an empty store. Protect and back up the deployment's
+state consistently; restoring key data with older replay state can allow reuse.
 
-```rust
-CITADEL_REPLAY_BACKEND=file
-CITADEL_REPLAY_FLUSH_MODE=batched  # default
-```
+## Audit restart boundary
 
-**Guarantees**:
-- ✅ Replay protection during normal operation
-- ✅ Replay claims survive graceful shutdown (force_flush())
-- ✅ Replay claims survive after periodic flush
-- ⚠️ Recent claims (< flush interval) lost on hard crash
-- ⚠️ Crash before flush creates replay window
+The API validates existing JSONL sequence/hash links before appending and resumes from
+the verified tail. Malformed or incomplete records stop startup without rewriting the
+log. Existing logs containing historical sequence resets need explicit recovery.
 
-**Crash Window**:
-- Time: 5 seconds maximum
-- Operations: 100 claims maximum
-- Whichever threshold is reached first triggers flush
+Audit appends are serialized and synced. Append failure is latched and reported by the
+HTTP boundary as 503, including the health endpoint; successful response bodies are
+withheld. Correct the storage problem and restart to validate the log before resuming.
+A failed response does not guarantee that a key-state mutation has been rolled back:
+key metadata and audit storage are not one atomic transaction.
 
-**Use For**:
-- Production systems with acceptable small crash window
-- High-throughput deployments (10K+ ops/sec)
-- Systems with monitoring and alerting
-
-**Mitigation**:
-- Call `force_flush()` in SIGTERM handler
-- Monitor replay backend health
-- Log flush failures
-
----
-
-### 3. FileReplayStore (Strict Mode)
-
-**Durability**: Immediate  
-**Crash Window**: None  
-**Trust Model**: Strong durability, lower throughput
-
-```rust
-CITADEL_REPLAY_BACKEND=file
-CITADEL_REPLAY_FLUSH_MODE=immediate
-```
-
-**Guarantees**:
-- ✅ Every claim immediately fsynced to disk
-- ✅ No crash window
-- ✅ Successful synchronous claims survive ordinary process termination and restart
-- ⚠️ Does not protect against storage rollback, deletion, corruption, or host compromise
-- ⚠️ Significantly slower (100-1000x write amplification)
-
-**Use For**:
-- Low-throughput production systems
-- High-assurance deployments
-- Compliance-critical systems
-
-**Trade-offs**:
-- Throughput: ~100 ops/sec (vs 10K+ batched)
-- Latency: +5-20ms per operation
-- Disk wear: Significant
-
----
-
-### 4. Distributed Backends (Future)
-
-**Examples**: Redis, DynamoDB, PostgreSQL  
-**Durability**: Depends on backend configuration  
-**Trust Model**: Inherits backend guarantees
-
-**Redis Example**:
-```rust
-CITADEL_REPLAY_BACKEND=redis
-```
-
-**Guarantees depend on Redis persistence**:
-- AOF with fsync=always → strong durability
-- AOF with fsync=everysec → 1-second window
-- RDB only → last snapshot window
-- No persistence → memory-only
-
-**DynamoDB Example**:
-- Immediately durable (service guarantee)
-- Cross-region replication available
-- Higher latency (~10-50ms)
-
----
-
-## Choosing the Right Backend
-
-| Requirement | Recommended Backend | Config |
-|-------------|-------------------|--------|
-| Development | Memory | `CITADEL_REPLAY_BACKEND=memory` |
-| Testing | File (batched) | `CITADEL_REPLAY_BACKEND=file` |
-| High-throughput controlled pilot | File (batched) + monitoring | Default + force_flush handler |
-| Higher-durability controlled pilot | File (strict) | `CITADEL_REPLAY_FLUSH_MODE=immediate` |
-| Distributed future deployment | Redis/DynamoDB | `CITADEL_REPLAY_BACKEND=redis` |
-
----
-
-## Threat Model Implications
-
-### Attack: Crash-before-flush replay window
-
-**Applies To**: FileReplayStore (batched), Redis (fsync=everysec)  
-**Attack Scenario**:
-1. Attacker observes ciphertext C1
-2. Attacker forces crash before flush (power failure, kill -9)
-3. System restarts, replay claim lost
-4. Attacker replays C1
-
-**Mitigations**:
-- Use strict mode for critical systems
-- Implement graceful shutdown with force_flush()
-- Monitor for abnormal restarts
-- Alert on replay backend failures
-
-### Attack: Local file tampering
-
-**Applies To**: FileReplayStore (both modes)  
-**Attack Scenario**:
-1. Attacker gains filesystem access
-2. Attacker truncates/modifies replay.db
-3. Replay protection bypassed
-
-**Mitigations**:
-- File integrity monitoring (AIDE, Tripwire)
-- Encrypted filesystem
-- Immutable infrastructure
-- External witness (future)
-
-### Attack: Distributed backend compromise
-
-**Applies To**: Redis, DynamoDB, etc.  
-**Attack Scenario**:
-1. Attacker compromises backend credentials
-2. Attacker flushes replay database
-3. Replay protection bypassed
-
-**Mitigations**:
-- Strong backend authentication
-- Network isolation
-- Audit logging
-- Backend-level access controls
-
----
-
-## Production Deployment Checklist
-
-**For Batched Mode**:
-- [ ] Implement SIGTERM handler calling force_flush()
-- [ ] Monitor replay backend health metrics
-- [ ] Alert on flush failures
-- [ ] Document acceptable crash window in threat model
-- [ ] Test crash recovery procedures
-
-**For Strict Mode**:
-- [ ] Validate acceptable throughput (< 1K ops/sec recommended)
-- [ ] Monitor disk I/O and wear
-- [ ] Consider SSD with power-loss protection
-- [ ] Test failure recovery
-
-**For Distributed Backends**:
-- [ ] Configure backend persistence appropriately
-- [ ] Implement connection retry logic
-- [ ] Monitor backend latency
-- [ ] Document backend trust assumptions
-- [ ] Plan for backend unavailability
-
----
-
-## Trust Statement
-
-**Replay protection guarantees are ONLY as strong as the backend durability mode.**
-
-If you configure:
-- Memory backend → No restart safety
-- Batched file → Bounded crash window
-- Strict file → Strong durability
-- Redis without AOF → Memory-only
-
-**Choose based on your threat model, not convenience.**
-
----
-
-## Future Enhancements
-
-Planned improvements to strengthen replay trust:
-
-1. **External Witness Integration**
-   - Certificate Transparency logs
-   - RFC 3161 timestamping
-   - Object-lock storage (S3 Glacier)
-
-2. **Crash Consistency Testing**
-   - Chaos monkey for crash simulation
-   - Automated recovery validation
-   - Fuzzing of crash scenarios
-
-3. **Distributed Consensus**
-   - Raft/Paxos-based replay store
-   - Multi-region replication
-   - Byzantine fault tolerance
-
----
-
-**Status**: This document supersedes earlier replay-persistence claims found to oversell actual guarantees; see the sections above for current, verified behavior.
+A local hash chain cannot authenticate an entirely replaced log or detect deletion of
+its tail without an independent trusted checkpoint. External anchoring and distributed
+log ownership are outside this repair.

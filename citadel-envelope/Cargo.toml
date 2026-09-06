@@ -178,3 +178,8 @@ required-features = ["bench"]
 [[example]]
 name = "demo"
 required-features = ["std"]
+
+[[bench]]
+name = "timing_attribution"
+harness = false
+required-features = ["timing-diagnostics"]

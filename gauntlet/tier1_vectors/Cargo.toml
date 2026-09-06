@@ -22,7 +22,7 @@ citadel-envelope = { path = "../../citadel-envelope", features = ["legacy-envelo
 wycheproof = "0.6"
 
 # EXACT pins matching citadel_v3/Cargo.lock — validates the shipped versions.
-aes-gcm = "=0.10.3"
+aes-gcm = { version = "=0.11.0", features = ["zeroize"] }
 x25519-dalek = { version = "=2.0.1", features = ["static_secrets"] }
 hkdf = "=0.12.4"
 sha2 = "=0.10.9"

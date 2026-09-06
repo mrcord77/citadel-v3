@@ -30,6 +30,15 @@ Failed authentication attempts are written to the tamper-evident JSONL audit log
 (`citadel-audit.jsonl`), not only to the rotating tracing log. Attackers cannot
 erase authentication history by rotating log files.
 
+### Audit continuity and persistence errors
+The API validates the existing audit log and resumes its sequence/hash chain at startup.
+Concurrent audit appends are serialized. A malformed or incomplete log stops startup
+without rewriting evidence. A live append failure is latched and causes explicit HTTP
+503 responses, including health, until storage is repaired and the process restarted.
+Key metadata changes are not transactionally rolled back by an audit error; a 503 may
+therefore require checking state before retrying a mutating operation. Local hash chains
+need an independent checkpoint to detect complete replacement or tail deletion.
+
 ### Replay protection (scope and limits — see below)
 
 ---
@@ -45,8 +54,11 @@ before a restart can be replayed within the TTL window (default 24h).
 **Use for:** Development and testing only. Never production.
 
 ### File backend (single-node production)
-**Guarantee:** Replays are rejected across process restarts. Nonces written to
-`CITADEL_DATA_DIR/replay.json` survive restart.  
+**Guarantee:** Each successful claim is persisted before decryption proceeds. The
+file and, on Unix, its parent directory are synchronized before acknowledgement.
+Claims in `CITADEL_DATA_DIR/replay.json` survive restart within their TTL, assuming
+storage honors those synchronization operations. There is no batching window.
+Windows crash durability has not been verified by the Linux regression checks.
 **NOT guaranteed:** Multi-instance safety. If two API instances share the same data
 directory, race conditions can allow a replay to succeed if the ciphertext arrives
 at the second instance before replication completes.  

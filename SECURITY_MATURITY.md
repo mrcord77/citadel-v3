@@ -122,8 +122,8 @@ complete two-run judge remains in progress.
 
 **Summary**:
 - Memory: Development only, no durability
-- File (batched): 5-second crash window
-- File (strict): Immediate durability, lower throughput
+- File: synchronized claims before acknowledgement; no batching window
+- File durability assumes Unix storage honoring fsync; Windows crash behavior remains unverified
 - Distributed: Inherits backend guarantees
 
 **Trust Assumption**: Operator chooses appropriate backend for threat model

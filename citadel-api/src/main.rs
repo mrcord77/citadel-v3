@@ -974,6 +974,34 @@ async fn authorize_api_key_admin_action(
 // Rate limiting middleware
 // ---------------------------------------------------------------------------
 
+/// Report audit storage failures explicitly and withhold successful responses
+/// (including decrypted plaintext) when an audit append failed during the request.
+async fn audit_health_middleware(
+    State(state): State<Shared>,
+    request: Request,
+    next: Next,
+) -> Response {
+    fn unavailable(error: std::io::Error) -> Response {
+        tracing::error!(%error, "audit persistence unavailable; request failed");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiError {
+                error: "audit persistence unavailable; operator recovery required".into(),
+                request_id: Some(new_request_id()),
+            }),
+        )
+            .into_response()
+    }
+    if let Err(error) = state.keystore.audit_health() {
+        return unavailable(error);
+    }
+    let response = next.run(request).await;
+    if let Err(error) = state.keystore.audit_health() {
+        return unavailable(error);
+    }
+    response
+}
+
 async fn rate_limit_middleware(
     State(state): State<Shared>,
     addr: Option<ConnectInfo<SocketAddr>>,
@@ -2940,8 +2968,12 @@ fn create_keystore(data_dir: &str) -> Keystore {
     let audit_path = format!("{}/citadel-audit.jsonl", data_dir);
     std::fs::create_dir_all(&keys_dir).expect("failed to create data directory");
     let storage = Arc::new(FileBackend::new(&keys_dir).expect("failed to init file storage"));
-    let file_sink: Arc<dyn AuditSinkSync> = Arc::new(FileAuditSink::new(&audit_path));
-    let audit: Arc<dyn AuditSinkSync> = Arc::new(IntegrityChainSink::new(file_sink));
+    let audit: Arc<dyn AuditSinkSync> = Arc::new(
+        IntegrityChainSink::open_file(&audit_path).unwrap_or_else(|error| {
+            eprintln!("[FATAL] Audit chain recovery failed: {error}");
+            std::process::exit(1);
+        }),
+    );
     let mut ks = if let Some(config) = pilot_config {
         let provider = LinuxFileRootKeyProvider::open(&config.root_key_file).unwrap_or_else(|e| {
             eprintln!("[FATAL] Linux root-key provider failed: {e}");
@@ -3370,6 +3402,10 @@ pub async fn build_app() -> Router {
             rate_limit_middleware,
         ))
         .layer(cors)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            audit_health_middleware,
+        ))
         .with_state(state);
 
     tracing::info!(
@@ -3415,8 +3451,34 @@ async fn main() {
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await
     .unwrap();
+}
+
+/// Drain in-flight requests on normal termination. File replay claims and audit
+/// appends are already synced before acknowledgement; correctness does not depend
+/// on destructors or this signal handler running after a crash.
+async fn shutdown_signal() {
+    let interrupt = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("install Ctrl-C handler");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = interrupt => {},
+        _ = terminate => {},
+    }
+    tracing::info!("shutdown requested; draining in-flight requests");
 }
 
 // ---------------------------------------------------------------------------

@@ -2109,6 +2109,12 @@ impl Keystore {
     /// P158 — Record an audit event directly into the tamper-evident audit chain.
     /// Used by the API layer to write auth failures and other security events
     /// that originate outside the keystore's own operations.
+    /// Surface audit persistence failures at service boundaries. This does not
+    /// roll back key mutations; callers must not report success after a failed audit.
+    pub fn audit_health(&self) -> std::io::Result<()> {
+        self.audit.check_health()
+    }
+
     pub fn record_audit_event(&self, action: crate::audit::AuditAction) {
         self.audit
             .record(crate::audit::AuditEvent::system_event(action));
