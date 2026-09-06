@@ -50,6 +50,27 @@ class Campaign(unittest.TestCase):
                 dict(mode='decap', vary='secret', status='FAIL')]
         self.assertEqual(verdict(rows), {'decap': 'FAIL'})
 
+    def test_public_only_decap_difference_is_reported_separately(self):
+        rows = [dict(mode='decap', vary='control', status='PASS'),
+                dict(mode='decap', vary='secret', status='PASS'),
+                dict(mode='decap', vary='public', status='FAIL'),
+                dict(mode='decap', vary='keys', status='FAIL')]
+        self.assertEqual(verdict(rows), {'decap': 'PUBLIC-DIFFERENCE'})
+
+    def test_unexplained_whole_key_difference_fails(self):
+        rows = [dict(mode='decap', vary='control', status='PASS'),
+                dict(mode='decap', vary='secret', status='PASS'),
+                dict(mode='decap', vary='public', status='PASS'),
+                dict(mode='decap', vary='keys', status='FAIL')]
+        self.assertEqual(verdict(rows), {'decap': 'FAIL'})
+
+    def test_public_difference_does_not_mask_secret_failure(self):
+        rows = [dict(mode='decap', vary='control', status='PASS'),
+                dict(mode='decap', vary='secret', status='FAIL'),
+                dict(mode='decap', vary='public', status='FAIL'),
+                dict(mode='decap', vary='keys', status='FAIL')]
+        self.assertEqual(verdict(rows), {'decap': 'FAIL'})
+
     def test_missing_control_blocks_pass(self):
         self.assertEqual(verdict([dict(mode='decap', vary='secret', status='PASS')]),
                          {'decap': 'INCONCLUSIVE'})

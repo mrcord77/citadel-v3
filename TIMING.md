@@ -64,6 +64,25 @@ tested x86-64 hardware. The cross-provider reproduction (three independently
 developed implementations, two languages, one C-with-assembly) rules out an
 implementation-specific code defect with high confidence.
 
+### RustCrypto component attribution (2026-09-06)
+
+The historical key-A-vs-key-B comparisons above vary an entire generated key and
+therefore do not distinguish its secret and public components. A later campaign against
+the shipped RustCrypto `ml-kem` 0.3.2 path varied those components independently, used
+paired null controls, two seeds, and both label orders at 100,000 generated samples/case:
+
+- all 8 decapsulation control/secret-only cases passed (`max |t| = 2.93693`);
+- all 8 public-part/whole-key cases failed (`|t| = 127.48` to `589.37`);
+- all 12 key-import control/secret/public cases passed (`max |t| = 3.99145`).
+
+Source tracing and a diagnostic-only cache experiment localize the large RustCrypto
+component to matrix reconstruction from public seed `rho`. ML-KEM's rejection sampler
+can consume different amounts of public pseudorandom input for different public keys.
+The effect is therefore retained as a public-key-dependent performance/key-identification
+characteristic, not classified by itself as secret leakage. The secret-only non-flags
+are supporting evidence, not a constant-time proof, and do not retroactively resolve
+the historical cross-provider whole-key results. See `gauntlet/VALIDATION_FOLLOWUP.md`.
+
 ### Interpretation
 
 This is **not** evidence of a cryptographic break of ML-KEM.

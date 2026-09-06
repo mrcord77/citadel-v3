@@ -1,70 +1,66 @@
-# Side-Channel Notes — Citadel V3
+# Side-Channel Notes - Citadel V3
 
-**Status:** Unreviewed. No independent side-channel analysis has been performed.
-
----
+**Status:** Internally evaluated; no independent side-channel audit has been performed.
 
 ## Allowed External Claim
 
-> Citadel attempts to use uniform external error behavior and avoids known obvious
-> error oracles, but has not undergone independent side-channel review.
-
----
+> Citadel uses constant-time comparison for secret equality, opaque decryption errors,
+> and timing screens for shipped paths. It has not undergone an independent side-channel
+> audit and does not claim platform-wide constant-time validation.
 
 ## What Is Intentionally Uniform
 
 ### Error responses
+
 All decryption failures return the same opaque error: `{"error":"decryption failed"}`.
-The response does not distinguish between: wrong key, wrong AAD, wrong context,
-truncated ciphertext, replay rejection, or corrupted data. This is deliberate.
+The response does not distinguish wrong key, wrong AAD, wrong context, truncated
+ciphertext, replay rejection, or corrupted data.
+
+### Secret comparisons and API authentication
+
+Envelope secret comparisons use constant-time primitives. API keys are stored as
+HMAC-SHA256 values and `citadel-api/src/main.rs` compares the encoded hashes with
+`subtle::ConstantTimeEq`. The former note that API-key hashes used ordinary `==` was
+stale and is superseded.
 
 ### Timing at the API layer
-The API returns errors without short-circuiting before the full decryption attempt
-where possible. However, this is not formally verified.
 
----
+The decrypt boundary uses opaque errors and a response-time floor. This reduces obvious
+remote timing cliffs but is not a proof that every deployment is timing-independent.
 
 ## What Is Not Proven
 
-- **Constant-time key comparison:** API key hash comparison uses `==` on byte arrays.
-  This may be vulnerable to timing attacks on the authentication path.
-- **Constant-time KEM operations:** ML-KEM-768 and X25519 constant-time behavior
-  is inherited from dependencies. Not independently verified on all platforms.
-- **Cache-timing:** No cache-timing analysis has been performed.
-- **Power analysis:** Not applicable to software-only deployment, but not analyzed.
+- **Whole-operation constant time:** ML-KEM and classical KEM behavior ultimately
+  depends on providers, generated code, CPU behavior, and deployment conditions.
+- **ML-KEM key independence:** Historical whole-key comparisons flagged. Follow-up
+  attribution reproduced a public-key-part distinction from public-`rho` matrix
+  reconstruction; repeated secret-only screens did not flag. This is a narrower result,
+  not a platform-wide proof.
+- **Cache and microarchitectural resistance:** Targeted timing and ctgrind work exists,
+  but no exhaustive cache, assembly, power/frequency, Spectre-class, or EM analysis has
+  been performed.
 - **Memory scraping:** Key material exists in process memory during operations.
-  Zeroization is used where supported (zeroize crate) but not audited.
-
----
+  Zeroization is used where supported but has not been independently audited.
 
 ## Crates Relied On for Timing Properties
 
-| Crate | Claim | Verified |
-|-------|-------|----------|
-| `x25519-dalek` | Constant-time DH | Claimed by crate, not independently verified |
-| `ml-kem` | Constant-time KEM | Experimental, not audited |
-| `aes-gcm` | Constant-time AES | Claimed, platform-dependent |
-| `subtle` | Constant-time primitives | Widely used, not independently verified here |
-| `hmac` | HMAC-SHA256 | Generally safe for MAC, timing not analyzed for API key comparison |
+| Crate | Use | Evidence boundary |
+|---|---|---|
+| `x25519-dalek` | X25519 DH | Provider design; not independently verified here |
+| `ml-kem` 0.3.2 | ML-KEM | Exact-pinned; conformance and timing tested; not independently audited |
+| `p384` 0.14.0 | P-384 ECDH | Constant-time formulas by design; generated assembly not vendor-assessed |
+| `aes-gcm` | AEAD | Provider design and local timing screens; platform-dependent |
+| `subtle` | Secret equality/selection | Used on explicit comparison paths |
+| `hmac` | API-key hashing and stream authentication | Verified through the selected RustCrypto implementation |
 
----
+## External Audit Priorities
 
-## Sensitive Operations (External Audit Should Review)
+1. ML-KEM decapsulation at source, generated-assembly, and microarchitectural levels.
+2. P-384 and X25519 generated code on supported target CPU families.
+3. End-to-end decrypt timing under realistic concurrency and response-floor behavior.
+4. Key-material lifetime and zeroization across success, failure, and restart paths.
 
-1. API key verification — `==` comparison on HMAC hashes
-2. Decryption error path — uniform response, but timing may vary
-3. ML-KEM decapsulation — experimental crate, constant-time not proven
-4. Key material zeroization — depends on compiler not optimizing away
+See `TIMING.md` for the timing policy and historical platform results, and
+`gauntlet/VALIDATION_FOLLOWUP.md` for the latest targeted attribution.
 
----
-
-## What External Audit Should Cover
-
-- Constant-time API key comparison (replace `==` with `subtle::ConstantTimeEq`)
-- ML-KEM-768 timing properties in `ml-kem` crate
-- Memory layout of key material during operations
-- Zeroization completeness across all key paths
-
----
-
-*Last updated: 2026-05-02 | citadel-v3-beta-001*
+*Last updated: 2026-09-06*

@@ -1,4 +1,4 @@
-# Validation repairs and unresolved timing findings
+# Validation repairs and timing follow-up
 
 These changes repair the validation tools. They do not change Citadel's production
 cryptographic operations, wire formats, or previously delivered restart repairs.
@@ -21,7 +21,9 @@ cryptographic operations, wire formats, or previously delivered restart repairs.
   and P-384 point decoding from ECDH. It uses shared input storage and class-independent
   ciphertext/point sampling, with explicit controls and reversed-label support.
 - `run_timing_attribution.py` builds the actual diagnostic, records command/status/raw
-  CSV for each case, and blocks an overall pass when controls flag or execution fails.
+  CSV for each case, and blocks an overall pass when controls flag, a secret screen
+  flags, or execution fails. A decapsulation difference isolated to the public portion
+  of an expanded key is reported as `PUBLIC-DIFFERENCE`, not as a secret-timing failure.
 - `run_ffi_sanitizers.sh` keeps leak detection enabled and propagates its exit status.
 
 ## Targeted verification on 2026-09-06
@@ -35,8 +37,9 @@ cryptographic operations, wire formats, or previously delivered restart repairs.
   14-byte buffer for 15-byte AAD. The buffer was repaired and the affected diagnostic
   rerun. Both failed attempts remain in the evidence; neither is counted as a pass.
 - New campaign runner integration completed two of those 25 measurements.
-- FFI assertions: 23 passed; overall sanitizer execution exited 23 because LSan could
-  not read the required /proc task information. Leak checking remains BLOCKED.
+- The initial FFI assertions passed, but that sanitizer invocation exited 23 because
+  LSan could not read the required `/proc` task information. This environment failure
+  was resolved and rerun successfully in the follow-up below.
 - No full workspace suite rerun. No production crypto or prior restart code changed.
 
 ## Timing interpretation
@@ -71,6 +74,42 @@ The result remains mixed and unresolved. The runner retains the flagged result.
 AAD fixtures use OS randomness; a bench seed alone does not reproduce those keys.
 ML-KEM and P-384 primitive fixtures use the bench seed. Raw timing samples are retained.
 
+## Follow-up verification on 2026-09-06
+
+The repaired tools were rerun sequentially on the same pinned WSL2 virtual CPU, with
+no compilation or fuzz workload running alongside the measurements. These screens are
+supporting evidence, not a constant-time proof and not a replacement for a controlled
+dedicated-host campaign.
+
+- FFI ASan plus LSan: all 23 assertions passed and the sanitizer process exited 0.
+  The earlier exit 23 was an invocation/environment problem, not a confirmed leak.
+- AAD attribution: all 8 control/public measurements passed across two seeds and
+  both label orders; maximum observed `|t|` was 3.68301. The earlier isolated AAD flag
+  was not reproduced.
+- ML-KEM import attribution: all 12 control/secret/public measurements passed across
+  two seeds and both label orders; maximum observed `|t|` was 3.99145.
+- ML-KEM decapsulation: all 8 control/secret-only measurements passed; maximum observed
+  `|t|` was 2.93693. Two additional 50,000-pair baseline secret/control repetitions
+  also produced no flags. The earlier small secret-only signal was not reproduced.
+- ML-KEM public-part and whole-generated-key decapsulation comparisons failed in every
+  seed/order (`|t|` from 127.48 to 589.37), while their paired secret-only and null
+  controls passed. This reproducibly isolates a public-key-dependent component.
+- P-384 parse controls: all 4 passed; maximum observed `|t|` was 1.87327. P-384
+  ECDH controls and secret screens: all 8 passed; maximum observed `|t|` was 3.71199.
+
+Source tracing localizes the RustCrypto `ml-kem` 0.3.2 public-part distinction to
+matrix reconstruction from public seed `rho`: rejection sampling can consume a
+different number of public pseudorandom bytes for different public keys. Caching the
+expanded public matrix in a diagnostic copy removed the whole-operation difference.
+That cache experiment is diagnostic-only and is not shipped. Upstream `ml-kem` does
+not expose the matrix internals needed for Citadel to add this cache without forking a
+cryptographic provider, so no speculative provider fork was introduced.
+
+The conclusion is bounded: the AAD and secret-only signals were not reproduced on this
+host; that does not prove their absence on every platform. The public-key distinction
+is real and retained as a performance/key-identification characteristic, but `rho` and
+the encapsulation key are public, so it is not by itself evidence of secret leakage.
+
 ## Reproduce only the affected checks
 
 From the repository root:
@@ -87,20 +126,20 @@ work to one unresolved primitive. It supports `--cpu`, `--seeds`, and `--samples
 The default is 100,000 samples/case, two seeds, and both label orders. Keep all
 receipts, including failed controls. Do not raise thresholds or add artificial delays.
 
-For memory checking on a host where LSan can inspect its process normally, install
-the nightly toolchain with rust-src first, then:
+For memory checking, install the nightly toolchain with rust-src first, then:
 
     bash gauntlet/run_ffi_sanitizers.sh
 
-A detector crash is not a passing result. This package does not change host security
-settings or claim the blocked leak check has been completed.
+A detector crash is not a passing result. The successful follow-up above used an
+environment in which LSan could inspect `/proc` normally.
 
 ## Remaining work
 
-Repeat the affected timing cases on controlled target hardware. A stable control is
-necessary before attributing small differences to secret processing. If a secret
-signal persists, isolate its operation/instructions and validate a reviewed repair
-or provider change against its affected vectors and rejection behavior. Larger
-public-key differences remain recorded separately from any secret-leak conclusion.
+Repeat the timing cases on controlled target hardware. A stable control is necessary
+before attributing small differences to secret processing. If a secret signal appears
+and persists, isolate its operation/instructions and validate a reviewed repair or
+provider change against its affected vectors and rejection behavior. Track an upstream
+public-matrix cache/API as a performance improvement, not as an emergency secret-leak
+patch. Public-key differences remain recorded separately from secret-leak conclusions.
 The existing restart fixes remain applicable; their durability/performance tradeoffs
 are unchanged by this package.

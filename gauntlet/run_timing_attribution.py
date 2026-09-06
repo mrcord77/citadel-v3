@@ -25,7 +25,21 @@ def verdict(rows):
         elif any(r['status'] == 'INCONCLUSIVE' for r in group):
             modes[mode] = 'INCONCLUSIVE'
         elif any(r['status'] == 'FAIL' for r in group):
-            modes[mode] = 'FAIL'
+            failures = {r['vary'] for r in group if r['status'] == 'FAIL'}
+            # In decapsulation attribution, `public` varies only the encoded
+            # public key and its hash inside the expanded key. A public-only
+            # timing distinction is retained, but it is not a failure of the
+            # secret-independence gate. `keys` varies the whole generated key;
+            # it is explained by the public result only when the secret-only
+            # screen passes.
+            statuses = {r['vary']: r['status'] for r in group}
+            public_explains_keys = (
+                mode == 'decap'
+                and failures <= {'public', 'keys'}
+                and statuses.get('public') == 'FAIL'
+                and statuses.get('secret') == 'PASS'
+            )
+            modes[mode] = 'PUBLIC-DIFFERENCE' if public_explains_keys else 'FAIL'
         else:
             modes[mode] = 'PASS'
     return modes
@@ -94,7 +108,8 @@ def main():
     summary = verdict(rows)
     (args.out / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
     print(json.dumps(summary, indent=2))
-    return 0 if summary and all(v == 'PASS' for v in summary.values()) else 2 if 'INCONCLUSIVE' in summary.values() else 1
+    accepted = {'PASS', 'PUBLIC-DIFFERENCE'}
+    return 0 if summary and all(v in accepted for v in summary.values()) else 2 if 'INCONCLUSIVE' in summary.values() else 1
 
 
 if __name__ == '__main__':

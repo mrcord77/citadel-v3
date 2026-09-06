@@ -83,7 +83,7 @@ Email: andre.cordero36@gmail.com
 
 ### What We Do NOT Guarantee
 
-1. **Key-material timing independence** — isolated ML-KEM private-byte classes show a small timing-distribution effect on the tested x86-64 host in the RustCrypto release provider and libcrux. Random-label controls pass, but the root cause is not proved. Treat this as a local/co-resident side-channel limitation; see `TIMING.md` for the full timing validation record.
+1. **Key-material timing independence** — historical whole-key ML-KEM comparisons produced timing differences on tested x86-64 providers. Follow-up RustCrypto attribution reproduced a large public-key-part distinction caused by public-`rho` matrix reconstruction, while repeated secret-only screens and their controls did not flag. This narrows but does not erase the platform-level limitation or establish constant-time behavior on every target; see `TIMING.md` and `gauntlet/VALIDATION_FOLLOWUP.md`.
 2. **Side-channel resistance** — not tested against power/EM/cache attacks beyond dudect
 3. **FIPS compliance** — uses NIST primitives, not a certified module
 4. **Constant-time validation** — source code follows CT discipline, but hardware data-dependent execution is unresolved
